@@ -27,21 +27,21 @@ import org.jfaster.mango.operator.Mango;
 import org.jfaster.mango.operator.cache.CacheHandler;
 import org.jfaster.mango.plugin.spring.DefaultMangoFactoryBean;
 import org.jfaster.mango.plugin.spring.config.*;
+import org.jfaster.mango.plugin.spring.datasource.AbstractProxyMasterSlaveDataSourceFactory;
+import org.jfaster.mango.plugin.spring.datasource.AbstractProxySimpleDataSourceFactory;
+import org.jfaster.mango.plugin.spring.exception.MangoAutoConfigException;
 import org.jfaster.mango.util.Strings;
 import org.jfaster.mango.util.logging.InternalLogger;
 import org.jfaster.mango.util.logging.InternalLoggerFactory;
 import org.jfaster.mango.util.reflect.Reflection;
-import org.jfaster.mango.plugin.spring.exception.MangoAutoConfigException;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.MutablePropertyValues;
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
-import org.springframework.beans.factory.config.RuntimeBeanReference;
 import org.springframework.beans.factory.support.BeanDefinitionBuilder;
 import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.springframework.beans.factory.support.GenericBeanDefinition;
-import org.springframework.beans.factory.support.ManagedList;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
 import org.springframework.core.io.Resource;
@@ -55,7 +55,9 @@ import org.springframework.core.type.classreading.MetadataReaderFactory;
 import org.springframework.util.ClassUtils;
 
 import javax.sql.DataSource;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 /**
  * @author  fangyanpeng.
@@ -66,6 +68,7 @@ public class MangoDaoAutoCreator implements BeanFactoryPostProcessor,BeanPostPro
 
 
     private static final String PREFIX = "mango";
+    private static final String TEST_PREFIX = "test";
 
     private static final List<String> DAO_ENDS = Arrays.asList("Dao", "DAO");
 
@@ -74,12 +77,14 @@ public class MangoDaoAutoCreator implements BeanFactoryPostProcessor,BeanPostPro
     private ApplicationContext context;
 
     private MangoConfig config;
+    private TestConfig testConfig;
 
 
     @Override
     public void postProcessBeanFactory(ConfigurableListableBeanFactory configurableListableBeanFactory) throws BeansException {
         DefaultListableBeanFactory beanFactory = (DefaultListableBeanFactory) configurableListableBeanFactory;
         config = MangoConfigFactory.getMangoConfig(beanFactory,PREFIX);
+        testConfig = TestConfigFactory.getTestConfig(beanFactory,TEST_PREFIX);
         if(config == null){
             throw new MangoAutoConfigException("Mango config file does not exist!");
         }
@@ -98,6 +103,10 @@ public class MangoDaoAutoCreator implements BeanFactoryPostProcessor,BeanPostPro
             List<MangoDataSourceConfig> datasources = config.getDatasources();
             if(datasources == null || datasources.size() == 0){
                 throw new MangoAutoConfigException("mango.datasources is not configured");
+            }
+            List<MangoDataSourceConfig> testDatasources = testConfig.getDatasources();
+            if(testDatasources == null || testDatasources.size() == 0){
+                logger.warn("test.datasources is not configured");
             }
             registryMangoInstance(beanFactory);
         }
@@ -143,11 +152,15 @@ public class MangoDaoAutoCreator implements BeanFactoryPostProcessor,BeanPostPro
     }
 
     /**
-     * 设置datasource
+     * 设置datasource和测试datasource
      * @param mango
      */
     private void configMangoDatasourceFactory(Mango mango){
-        for(MangoDataSourceConfig dataSourceConfig : config.getDatasources()){
+        List<MangoDataSourceConfig> datasources = config.getDatasources();
+        List<MangoDataSourceConfig> testDatasources = testConfig.getDatasources();
+        for (int i = 0; i < datasources.size(); i++) {
+            MangoDataSourceConfig dataSourceConfig = datasources.get(i);
+
             String name = dataSourceConfig.getName();
             MangoHikaricpConfig masterConfig = dataSourceConfig.getMaster();
             List<MangoHikaricpConfig> slaveConfigs = dataSourceConfig.getSlaves();
@@ -160,13 +173,126 @@ public class MangoDaoAutoCreator implements BeanFactoryPostProcessor,BeanPostPro
             DataSourceFactory dataSourceFactory;
             DataSource masterDataSource = getDataSource(masterConfig);
             if(slaveConfigs == null || slaveConfigs.isEmpty()){
-                dataSourceFactory = new SimpleDataSourceFactory(name,masterDataSource);
+                if (testDatasources == null || testDatasources.size() == 0) {
+                    dataSourceFactory = new SimpleDataSourceFactory(name,masterDataSource);
+                } else {
+                    MangoDataSourceConfig testDataSourceConfig = null;
+                    if (name.equals(AbstractDataSourceFactory.DEFULT_NAME)) {
+                        testDataSourceConfig = testDatasources.get(i);
+                    } else {
+                        for (MangoDataSourceConfig t: testDatasources) {
+                            String testName = t.getName();
+                            if (name.equals(testName)) {
+                                testDataSourceConfig = t;
+                            }
+                        }
+                        if (testDataSourceConfig == null) {
+                            throw new MangoAutoConfigException("Does not exist test master datasource named: " + name);
+                        }
+                    }
+
+                    MangoHikaricpConfig testMasterConfig = testDataSourceConfig.getMaster();
+                    if (testMasterConfig == null) {
+                        throw new MangoAutoConfigException("Does not exist test master datasource");
+                    }
+                    DataSource testMasterDataSource = getDataSource(testMasterConfig);
+
+                    if(Strings.isEmpty(testConfig.getSimpleDataSourceFactoryClass())){
+                        throw new MangoAutoConfigException("Does not exist test simpleDataSourceFactoryClass");
+                    }
+
+                    Class dataSourceFactoryClass;
+                    try {
+                        dataSourceFactoryClass = ClassUtils.forName(
+                                testConfig.getSimpleDataSourceFactoryClass(), MangoAutoConfiguration.class.getClassLoader());
+                    } catch (ClassNotFoundException e) {
+                        throw new MangoAutoConfigException(e);
+                    }
+
+                    AbstractProxySimpleDataSourceFactory instance;
+                    try {
+                        instance = (AbstractProxySimpleDataSourceFactory) dataSourceFactoryClass.newInstance();
+                        instance.setName(name);
+                        instance.setDataSource(masterDataSource);
+                        instance.setTestDataSource(testMasterDataSource);
+                    } catch (InstantiationException e) {
+                        throw new MangoAutoConfigException(e);
+                    } catch (IllegalAccessException e) {
+                        throw new MangoAutoConfigException(e);
+                    }
+
+                    dataSourceFactory = instance;
+                }
             }else {
                 List<DataSource> slaves = new ArrayList<>(slaveConfigs.size());
                 for(MangoHikaricpConfig hikaricpConfig : slaveConfigs){
                     slaves.add(getDataSource(hikaricpConfig));
                 }
-                dataSourceFactory = new MasterSlaveDataSourceFactory(name,masterDataSource,slaves);
+
+                if (testDatasources == null || testDatasources.size() == 0) {
+                    dataSourceFactory = new MasterSlaveDataSourceFactory(name,masterDataSource,slaves);
+                } else {
+                    MangoDataSourceConfig testDataSourceConfig = null;
+
+                    if (name.equals(AbstractDataSourceFactory.DEFULT_NAME)) {
+                        testDataSourceConfig = testDatasources.get(i);
+                    } else {
+                        for (MangoDataSourceConfig t: testDatasources) {
+                            String testName = t.getName();
+                            if (name.equals(testName)) {
+                                testDataSourceConfig = t;
+                            }
+                        }
+                        if (testDataSourceConfig == null) {
+                            throw new MangoAutoConfigException("Does not exist test master datasource named: " + name);
+                        }
+                    }
+
+                    List<MangoHikaricpConfig> testSlaveConfigs = testDataSourceConfig.getSlaves();
+                    if(testSlaveConfigs == null || testSlaveConfigs.isEmpty()) {
+                        throw new MangoAutoConfigException("Test master datasource [" + name + "] does not exist slave datasource");
+                    }
+
+                    MangoHikaricpConfig testMasterConfig = testDataSourceConfig.getMaster();
+                    if (testMasterConfig == null) {
+                        throw new MangoAutoConfigException("Does not exist test master datasource");
+                    }
+                    DataSource testMasterDataSource = getDataSource(testMasterConfig);
+
+                    List<DataSource> testSlaves = new ArrayList<>(testSlaveConfigs.size());
+                    for(MangoHikaricpConfig hikaricpConfig : testSlaveConfigs){
+                        testSlaves.add(getDataSource(hikaricpConfig));
+                    }
+
+                    if(Strings.isEmpty(testConfig.getMasterSlaveDataSourceFactoryClass())){
+                        throw new MangoAutoConfigException("Does not exist test masterSlaveDataSourceFactoryClass");
+                    }
+
+                    Class dataSourceFactoryClass;
+                    try {
+                        dataSourceFactoryClass = ClassUtils.forName(
+                                testConfig.getMasterSlaveDataSourceFactoryClass(), MangoAutoConfiguration.class.getClassLoader());
+                    } catch (ClassNotFoundException e) {
+                        throw new MangoAutoConfigException(e);
+                    }
+
+                    AbstractProxyMasterSlaveDataSourceFactory instance;
+                    try {
+                        instance = (AbstractProxyMasterSlaveDataSourceFactory) dataSourceFactoryClass.newInstance();
+                        instance.setName(name);
+                        instance.setMaster(masterDataSource);
+                        instance.setSlaves(slaves);
+                        instance.setTestMaster(testMasterDataSource);
+                        instance.setTestSlaves(testSlaves);
+                    } catch (InstantiationException e) {
+                        throw new MangoAutoConfigException(e);
+                    } catch (IllegalAccessException e) {
+                        throw new MangoAutoConfigException(e);
+                    }
+
+                    dataSourceFactory = instance;
+                }
+
             }
             mango.addDataSourceFactory(dataSourceFactory);
         }

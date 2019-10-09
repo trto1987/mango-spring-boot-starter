@@ -145,6 +145,35 @@ Mango针对springboot提供的starter
 
 注释部分不是必须配置项，可以根据自己需要自行配置。
 
+
+## 测试数据源配置（选择配置项）
+    # 测试数据连接
+    test:
+      datasources:
+        - name: ds1
+          master:
+            driver-class-name: com.mysql.jdbc.Driver
+            jdbc-url: jdbc:mysql://127.0.0.1:3306/test2
+            user-name: root
+            password: 272777475
+            maximum-pool-size: 10
+            connection-timeout: 3000
+            
+          #slaves:
+          #  - driver-class-name: com.mysql.jdbc.Driver
+          #    jdbc-url: jdbc:mysql://127.0.0.1:3306/test
+          #    user-name: root
+          #    password: 272777475
+          #    maximum-pool-size: 10
+          #    connection-timeout: 3000
+      
+      # 通过继承AbstractProxySimpleDataSourceFactory或AbstractProxyMasterSlaveDataSourceFactory来自定义主库和测试库切换策略    
+      # 简单数据源
+      simple-data-source-factory-class: org.jfaster.mango.plugin.spring.datasource.AbstractProxySimpleDataSourceFactory
+      # 主从数据源
+      # master-slave-data-source-factory-class: org.jfaster.mango.plugin.spring.datasource.AbstractProxyMasterSlaveDataSourceFactory
+
+
 ## 创建dao，并启动应用
  
 1.
